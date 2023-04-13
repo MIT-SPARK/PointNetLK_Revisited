@@ -140,8 +140,10 @@ class AnalyticalPointNetLK(torch.nn.Module):
         return loss_pose
 
     @staticmethod
-    def do_forward(net, p0, voxel_coords_p0, p1, voxel_coords_p1, maxiter=10, xtol=1.0e-7, p0_zero_mean=True, p1_zero_mean=True, mode='train', data_type='synthetic', num_random_points=100):
+    def do_forward(net, p0, voxel_coords_p0, p1, voxel_coords_p1, maxiter=10, xtol=1.0e-7, p0_zero_mean=True,
+                   p1_zero_mean=True, mode='train', data_type='synthetic', num_random_points=100):
         voxel_coords_diff = None
+        # breakpoint()
         if mode != 'test' or data_type == 'synthetic':
             a0 = torch.eye(4).view(1, 4, 4).expand(
                 p0.size(0), 4, 4).to(p0)  # [B, 4, 4]
@@ -186,7 +188,8 @@ class AnalyticalPointNetLK(torch.nn.Module):
         else:
             q1 = p1
 
-        r = net(q0, q1, mode, maxiter=maxiter, xtol=xtol, voxel_coords_diff=voxel_coords_diff, data_type=data_type, num_random_points=num_random_points)
+        r = net(q0, q1, mode, maxiter=maxiter, xtol=xtol, voxel_coords_diff=voxel_coords_diff,
+                data_type=data_type, num_random_points=num_random_points)
 
         if p0_zero_mean or p1_zero_mean:
             # output' = trans(p0_m) * output * trans(-p1_m)
@@ -201,13 +204,15 @@ class AnalyticalPointNetLK(torch.nn.Module):
 
         return r
 
-    def forward(self, p0, p1, mode, maxiter=10, xtol=1.0e-7, voxel_coords_diff=None, data_type='synthetic', num_random_points=100):
+    def forward(self, p0, p1, mode, maxiter=10, xtol=1.0e-7, voxel_coords_diff=None,
+                data_type='synthetic', num_random_points=100):
         if mode != 'test' or data_type == 'synthetic':
             g0 = torch.eye(4).to(p0).view(1, 4, 4).expand(
                 p0.size(0), 4, 4).contiguous()
         else:
             g0 = torch.eye(4).to(p0).view(1, 4, 4)
-        r, g, itr = self.iclk_new(g0, p0, p1, maxiter, xtol, mode, voxel_coords_diff=voxel_coords_diff, data_type=data_type, num_random_points=num_random_points)
+        r, g, itr = self.iclk_new(g0, p0, p1, maxiter, xtol, mode, voxel_coords_diff=voxel_coords_diff,
+                                  data_type=data_type, num_random_points=num_random_points)
 
         self.g = g
         self.itr = itr
@@ -309,8 +314,10 @@ class AnalyticalPointNetLK(torch.nn.Module):
         Jt = J.transpose(1, 2)   # [B, 6, K]
         H = Jt.bmm(J)   # [B, 6, 6]
         B = self.inverse(H)
+        del H, J
         pinv = B.bmm(Jt)   # [B, 6, K]
-        
+        del Jt, B
+
         # iteratively solve for the pose
         itr = 0
         r = None

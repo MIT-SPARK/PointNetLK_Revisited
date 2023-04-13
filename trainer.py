@@ -3,14 +3,17 @@
 import torch
 import numpy as np
 from scipy.spatial.transform import Rotation
-import tqdm
+from tqdm import tqdm
 import logging
 import open3d as o3d
-from open3d.web_visualizer import draw   # for notebook
+# from open3d.web_visualizer import draw   # for notebook
 
 import model
 import utils
 
+import sys
+sys.path.append("../")
+from utils_eval import EvalData
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.NullHandler())
@@ -29,7 +32,7 @@ class TrainerAnalyticalPointNetLK:
         # network
         self.embedding = args.embedding
         self.filename = args.outfile
-        
+
     def create_features(self):
         if self.embedding == 'pointnet':
             ptnet = model.Pointnet_Features(dim_k=self.dim_k)
@@ -42,14 +45,15 @@ class TrainerAnalyticalPointNetLK:
         ptnet = self.create_features()
         return self.create_from_pointnet_features(ptnet)
 
-    def train_one_epoch(self, ptnetlk, trainloader, optimizer, device, mode, data_type='synthetic', num_random_points=100):
+    def train_one_epoch(self, ptnetlk, trainloader, optimizer, device, mode,
+                        data_type='synthetic', num_random_points=100, writer=None, epoch=0):
         ptnetlk.float()
         ptnetlk.train()
         vloss = 0.0
         gloss = 0.0
         batches = 0
-
-        for i, data in enumerate(trainloader):
+        len_ = len(trainloader)
+        for i, data in tqdm(enumerate(trainloader), total=len(trainloader)):
             loss, loss_pose = self.compute_loss(ptnetlk, data, device, mode, data_type, num_random_points)
 
             optimizer.zero_grad()
@@ -61,28 +65,158 @@ class TrainerAnalyticalPointNetLK:
             gloss += (loss_pose.item())
             batches += 1
 
+            if writer is not None:
+                writer.add_scalar('Loss/train', loss.item(), i + epoch*len_)
+
         ave_vloss = float(vloss) / batches
         ave_loss_pose = float(gloss) / batches
         
         return ave_vloss, ave_loss_pose
 
-    def eval_one_epoch(self, ptnetlk, evalloader, device, mode, data_type='synthetic', num_random_points=100):
+    def eval_one_epoch(self, ptnetlk, evalloader, device, mode, data_type='synthetic',
+                       num_random_points=100, writer=None, epoch=0):
         ptnetlk.eval()
         vloss = 0.0
         gloss = 0.0
         batches = 0
-
-        for _, data in enumerate(evalloader):
+        len_ = len(evalloader)
+        for i, data in tqdm(enumerate(evalloader), total=len(evalloader)):
             loss, loss_pose = self.compute_loss(ptnetlk, data, device, mode, data_type, num_random_points)
 
             vloss += (loss.item())
             gloss += (loss_pose.item())
             batches += 1
 
+            if writer is not None:
+                writer.add_scalar('Loss/val', loss.item(), i + epoch*len_)
+
         ave_vloss = float(vloss)/batches
         ave_loss_pose = float(gloss)/batches
         
         return ave_vloss, ave_loss_pose
+
+    def test_light_one_epoch(self, ptnetlk, testloader, device, mode,
+                             data_type='synthetic', vis=False, toyexample=False, writer=None, savedir='./'):
+
+        ptnetlk.eval()
+        # rotations_gt = []
+        # translation_gt = []
+        # rotations_ab = []
+        # translation_ab = []
+        angle_error = []
+        trans_error = []
+        adds_error = []
+
+        if testloader.batch_size != 1:
+            raise ValueError("batch size has to be 1, at test time")
+
+        for i, data in tqdm(enumerate(testloader), total=len(testloader), position=0):
+
+            if data_type == 'synthetic':
+                p0, p1, gt_pose = data
+                p0 = p0.to(self.device)
+                p1 = p1.to(self.device)
+                gt_pose = gt_pose.to(device)
+                r = model.AnalyticalPointNetLK.do_forward(ptnetlk, p0, None,
+                                                          p1, None, self.max_iter, self.xtol, self.p0_zero_mean,
+                                                          self.p1_zero_mean, mode, data_type)
+                del p1, r
+            else:
+                raise ValueError("data_type should be synthetic.")
+
+            estimated_pose = ptnetlk.g
+
+            ig_gt = gt_pose.cpu().contiguous().view(-1, 4, 4)  # --> [1, 4, 4]
+            g_hat = estimated_pose.cpu().contiguous().view(-1, 4, 4).detach()  # --> [1, 4, 4], p1->p0 (S->T)
+
+            del estimated_pose, gt_pose
+            # dg = g_hat.bmm(ig_gt)  # if correct, dg == identity matrix.
+            # dx = utils.log(dg)  # --> [1, 6] (if corerct, dx == zero vector)
+            # dn = dx.norm(p=2, dim=1)  # --> [1]
+            # dm = dn.mean()
+
+            # NOTE: this logger will make tqdm print a new line each time.
+            # LOGGER.info('test, %d/%d, %d iterations, %f', i, len(testloader), i, dm)
+
+            # RT: my evaluation script.
+            Rmat_gt = ig_gt[:, :3, :3].to(self.device)
+            tmat_gt = ig_gt[:, :3, 3:].to(self.device)
+            del ig_gt
+            R_temp = g_hat[:, :3, :3].to(self.device)
+            t_temp = g_hat[:, :3, 3:].to(self.device)
+            del g_hat
+            Rmat_est = R_temp.transpose(-1, -2)
+            tmat_est = - Rmat_est @ t_temp
+            del R_temp, t_temp
+
+            # assuming batch size of 1
+            Rmat_gt = Rmat_gt[0, ...]
+            Rmat_est = Rmat_est[0, ...]
+            tmat_gt = tmat_gt[0, ...]
+            tmat_est = tmat_est[0, ...]
+            X = p0[0, ...].T
+            del p0
+
+            #TODO: use functions in utils_common.py to compute the evaluation metrics.
+            temp_ = 0.5 * (torch.trace(Rmat_est.T @ Rmat_gt) - 1)
+            temp1 = torch.min(torch.tensor([temp_, 0.999]))
+            temp2 = torch.max(torch.tensor([temp1, -0.999]))
+            angle_err_ = torch.acos(temp2)
+            trans_err_ = torch.norm(tmat_est - tmat_gt)
+            Z = (Rmat_gt @ X + tmat_gt) - (Rmat_est @ X + tmat_est)
+            del Rmat_gt, Rmat_est, tmat_gt, tmat_est, X
+            dist_ = torch.norm(Z, p=2, dim=0)
+            del Z
+            adds_err_ = torch.mean(dist_)
+
+            # breakpoint()
+            angle_error.append(angle_err_.item())
+            trans_error.append(trans_err_.item())
+            adds_error.append(adds_err_.item())
+            del angle_err_, trans_err_, adds_err_
+
+            # euler representation for ground truth
+            # tform_gt = ig_gt.squeeze().numpy().transpose()
+            # R_gt = tform_gt[:3, :3]
+            # euler_angle = Rotation.from_matrix(R_gt)
+            # anglez_gt, angley_gt, anglex_gt = euler_angle.as_euler('zyx')
+            # angle_gt = np.array([anglex_gt, angley_gt, anglez_gt])
+            # rotations_gt.append(angle_gt)
+            # trans_gt_t = -R_gt.dot(tform_gt[3, :3])
+            # translation_gt.append(trans_gt_t)
+            # # euler representation for predicted transformation
+            # tform_ab = g_hat.squeeze().numpy()
+            # R_ab = tform_ab[:3, :3]
+            # euler_angle = Rotation.from_matrix(R_ab)
+            # anglez_ab, angley_ab, anglex_ab = euler_angle.as_euler('zyx')
+            # angle_ab = np.array([anglex_ab, angley_ab, anglez_ab])
+            # rotations_ab.append(angle_ab)
+            # trans_ab = tform_ab[:3, 3]
+            # translation_ab.append(trans_ab)
+
+            # del dg, dx, dn, dm
+            # del tform_gt, tform_ab, R_gt, euler_angle
+            # del angle_gt, angley_ab, anglex_ab
+            # del trans_gt_t, g_hat, R_ab
+            # del anglex_gt, angley_gt, anglez_gt, trans_ab
+            torch.cuda.empty_cache()
+
+            # utils.test_metrics(rotations_gt, translation_gt, rotations_ab, translation_ab, self.filename)
+
+            if writer is not None:
+                # breakpoint()
+                writer.add_histogram('test/rotation_err', torch.tensor(angle_error), bins=100)
+                writer.add_histogram('test/trans_err', torch.tensor(trans_error), bins=100)
+                writer.add_histogram('test/adds_err', torch.tensor(adds_error), bins=100)
+
+                data_ = EvalData()
+                data_.set_adds(np.array(adds_error))
+                data_.set_rerr(np.array(angle_error))
+                data_.set_terr(np.array(trans_error))
+                savefile = savedir +'eval_data.pkl'
+                data_.save(savefile)
+
+        return None
 
     def test_one_epoch(self, ptnetlk, testloader, device, mode, data_type='synthetic', vis=False, toyexample=False):
         ptnetlk.eval()
@@ -90,9 +224,11 @@ class TrainerAnalyticalPointNetLK:
         translation_gt = []
         rotations_ab = []
         translation_ab = []
-        
-        for i, data in tqdm.tqdm(enumerate(testloader), total=len(testloader), ncols=73, leave=False):
+
+        for i, data in tqdm(enumerate(testloader), total=len(testloader)):
             # if voxelization: VxNx3, Vx3, 1x4x4
+            # breakpoint()
+            print(i)
             if data_type == 'real':
                 if vis:
                     voxel_features_p0, voxel_coords_p0, voxel_features_p1, voxel_coords_p1, gt_pose, p0, p1 = data
@@ -100,6 +236,8 @@ class TrainerAnalyticalPointNetLK:
                     p1 = p1.float().to(device)
                 else:
                     voxel_features_p0, voxel_coords_p0, voxel_features_p1, voxel_coords_p1, gt_pose = data
+                    # voxel_features_p0, voxel_coords_p0, voxel_features_p1, voxel_coords_p1, gt_pose, _, _ = data
+
                 voxel_features_p0 = voxel_features_p0.reshape(-1, voxel_features_p0.shape[2], voxel_features_p0.shape[3]).to(device)
                 voxel_features_p1 = voxel_features_p1.reshape(-1, voxel_features_p1.shape[2], voxel_features_p1.shape[3]).to(device)
                 voxel_coords_p0 = voxel_coords_p0.reshape(-1, voxel_coords_p0.shape[2]).to(device)
@@ -134,6 +272,7 @@ class TrainerAnalyticalPointNetLK:
                     _ = model.AnalyticalPointNetLK.do_forward(ptnetlk, voxel_features_p0, voxel_coords_p0,
                                 voxel_features_p1, voxel_coords_p1, j, self.xtol, self.p0_zero_mean, self.p1_zero_mean, mode, data_type)
                 else:
+                    # breakpoint()
                     _ = model.AnalyticalPointNetLK.do_forward(ptnetlk, p0, None,
                                 p1, None, j, self.xtol, self.p0_zero_mean, self.p1_zero_mean, mode, data_type)
 
@@ -203,9 +342,19 @@ class TrainerAnalyticalPointNetLK:
             trans_ab = tform_ab[:3, 3]
             translation_ab.append(trans_ab)
 
+            if data_type == 'real':
+                del voxel_features_p0, voxel_coords_p0, voxel_features_p1, voxel_coords_p1
+
+            del dg, dx, dn, dm, tform_gt, tform_ab, R_gt, euler_angle
+            del angle_gt, angley_ab, anglex_ab
+            del trans_gt_t, g_hat, R_ab
+            del anglex_gt, angley_gt, anglez_gt, trans_ab
+            del estimated_pose
+            torch.cuda.empty_cache()
+
         utils.test_metrics(rotations_gt, translation_gt, rotations_ab, translation_ab, self.filename)
         
-        return 
+        return
 
     def compute_loss(self, ptnetlk, data, device, mode, data_type='synthetic', num_random_points=100):
         # 1. non-voxelization
@@ -236,7 +385,8 @@ class TrainerAnalyticalPointNetLK:
             loss_r = model.AnalyticalPointNetLK.rsq(r - pr)
         else:
             loss_r = model.AnalyticalPointNetLK.rsq(r)
-        loss = loss_r + loss_pose
+        # loss = loss_r + loss_pose
+        loss = loss_r #TODO: Removed loss_pose, as it gave NaNs
 
         return loss, loss_pose
 

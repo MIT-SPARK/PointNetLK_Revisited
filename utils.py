@@ -286,9 +286,13 @@ class ExpMap(torch.autograd.Function):
 def feature_jac(M, A, Ax, BN, device):
     # M, A, Ax, BN: list
     A1, A2, A3 = A
+    del A
     M1, M2, M3 = M
+    del M
     Ax1, Ax2, Ax3 = Ax
+    del Ax
     BN1, BN2, BN3 = BN
+    del BN
 
     # 1 x c_in x c_out x 1
     A1 = (A1.T).detach().unsqueeze(-1)
@@ -298,9 +302,12 @@ def feature_jac(M, A, Ax, BN, device):
     # calculate gradient for batch normalization using autograd, 
     # since the dimension is small, and the actual computation is complex.
     # B x 1 x c_out x N
-    dBN1 = torch.autograd.grad(outputs=BN1, inputs=Ax1, grad_outputs=torch.ones(BN1.size()).to(device), retain_graph=True)[0].unsqueeze(1).detach()
-    dBN2 = torch.autograd.grad(outputs=BN2, inputs=Ax2, grad_outputs=torch.ones(BN2.size()).to(device), retain_graph=True)[0].unsqueeze(1).detach()
-    dBN3 = torch.autograd.grad(outputs=BN3, inputs=Ax3, grad_outputs=torch.ones(BN3.size()).to(device), retain_graph=True)[0].unsqueeze(1).detach()
+    dBN1 = torch.autograd.grad(outputs=BN1, inputs=Ax1,
+                               grad_outputs=torch.ones(BN1.size()).to(device), retain_graph=True)[0].unsqueeze(1).detach()
+    dBN2 = torch.autograd.grad(outputs=BN2, inputs=Ax2,
+                               grad_outputs=torch.ones(BN2.size()).to(device), retain_graph=True)[0].unsqueeze(1).detach()
+    dBN3 = torch.autograd.grad(outputs=BN3, inputs=Ax3,
+                               grad_outputs=torch.ones(BN3.size()).to(device), retain_graph=True)[0].unsqueeze(1).detach()
 
     # B x 1 x c_out x N
     M1 = M1.detach().unsqueeze(1)
@@ -309,14 +316,20 @@ def feature_jac(M, A, Ax, BN, device):
 
     # 1. using *, naturally broadcast --> B x c_in x c_out x N
     A1BN1M1 = A1 * dBN1 * M1
+    del A1, dBN1, M1
     A2BN2M2 = A2 * dBN2 * M2
-    A3BN3M3 =  M3 * dBN3 * A3
+    del A2, dBN2, M2
+    A3BN3M3 = M3 * dBN3 * A3
+    del M3, dBN3, A3
 
     # using torch.einsum()
     A1BN1M1_A2BN2M2 = torch.einsum('ijkl,ikml->ijml', A1BN1M1, A2BN2M2)   # B x 3 x 64 x N
+    del A1BN1M1, A2BN2M2
     A2BN2M2_A3BN3M3 = torch.einsum('ijkl,ikml->ijml', A1BN1M1_A2BN2M2, A3BN3M3)   # B x 3 x K x N
-    
+    del A3BN3M3
+
     feat_jac = A2BN2M2_A3BN3M3
+    del A2BN2M2_A3BN3M3
 
     return feat_jac   # B x 3 x K x N
 
@@ -388,6 +401,7 @@ def cal_conditioned_warp_jacobian(voxel_coords):
 
 # functions for testing metrics
 def test_metrics(rotations_gt, translation_gt, rotations_ab, translation_ab, filename):
+    breakpoint()
     rotations_gt = np.concatenate(rotations_gt, axis=0).reshape(-1, 3)
     translation_gt = np.concatenate(translation_gt, axis=0).reshape(-1, 3)
     rotations_ab = np.concatenate(rotations_ab, axis=0).reshape(-1, 3)

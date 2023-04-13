@@ -53,7 +53,8 @@ def find_voxel_overlaps(p0, p1, voxel):
 
 
 class ThreeDMatch_Testing(torch.utils.data.Dataset):
-    def __init__(self, dataset_path, category, overlap_ratio, voxel_ratio, voxel, max_voxel_points, num_voxels, rigid_transform, vis, voxel_after_transf):
+    def __init__(self, dataset_path, category, overlap_ratio, voxel_ratio, voxel, max_voxel_points, num_voxels,
+                 rigid_transform, vis, voxel_after_transf):
         self.dataset_path = dataset_path
         self.pairs = []
         with open(category, 'r') as fi:
@@ -88,7 +89,9 @@ class ThreeDMatch_Testing(torch.utils.data.Dataset):
         return p1, igt
     
     def __getitem__(self, index):
-        p0_pre, p1_pre = load_3dmatch_batch_data(os.path.join(self.dataset_path, self.pairs[index][0]), os.path.join(self.dataset_path, self.pairs[index][1]), self.voxel_ratio)
+        p0_pre, p1_pre = load_3dmatch_batch_data(os.path.join(self.dataset_path, self.pairs[index][0]),
+                                                 os.path.join(self.dataset_path, self.pairs[index][1]),
+                                                 self.voxel_ratio)
         
         if self.voxel_after_transf:
             x = torch.from_numpy(self.perturbation[index][np.newaxis,...])
@@ -124,7 +127,19 @@ class ThreeDMatch_Testing(torch.utils.data.Dataset):
                             (vx, vy, vz), self.max_voxel_points, reverse_index=False, max_voxels=self.num_voxels)
         else:
             # voxelization
-            p0, p1, xmin, ymin, zmin, xmax, ymax, zmax, vx, vy, vz = find_voxel_overlaps(p0_pre, p1_pre, self.voxel)   # constraints of P1 ^ P2, where contains roughly overlapped area
+            # display_two_pcs(pc1 = torch.from_numpy(p0_pre).T, pc2=torch.from_numpy(p1_pre).T)
+
+            p0, p1, xmin, ymin, zmin, xmax, ymax, zmax, vx, vy, vz = find_voxel_overlaps(p0_pre, p1_pre, self.voxel)
+
+            #NOTE: The code omits non-overlapping points in 3DMatch.
+            # display_two_pcs(pc1=torch.from_numpy(p0_pre).T.to(device='cuda'),
+            #                 pc2=torch.from_numpy(p1_pre).T.to(device='cuda'))
+            # display_two_pcs(pc1=torch.from_numpy(p0_pre).T.to(device='cuda'),
+            #                 pc2=torch.from_numpy(p0).T.to(device='cuda'))
+            # display_two_pcs(pc1=torch.from_numpy(p1_pre).T.to(device='cuda'),
+            #                 pc2=torch.from_numpy(p1).T.to(device='cuda'))
+            # breakpoint()
+            # constraints of P1 ^ P2, where contains roughly overlapped area
             voxels_p0, coords_p0, num_points_per_voxel_p0 = points_to_voxel_second(p0, (xmin, ymin, zmin, xmax, ymax, zmax), 
                             (vx, vy, vz), self.max_voxel_points, reverse_index=False, max_voxels=self.num_voxels)
             voxels_p1, coords_p1, num_points_per_voxel_p1 = points_to_voxel_second(p1, (xmin, ymin, zmin, xmax, ymax, zmax), 
@@ -175,7 +190,7 @@ class ThreeDMatch_Testing(torch.utils.data.Dataset):
         
         if self.vis:
             return voxels_p0, voxel_coords_p0, voxels_p1, voxel_coords_p1, igt, p0, p1
-        else:    
+        else:
             return voxels_p0, voxel_coords_p0, voxels_p1, voxel_coords_p1, igt
 
 
@@ -309,7 +324,30 @@ class PointRegistration(torch.utils.data.Dataset):
         
         # p0: template, p1: source, igt:transform matrix from p0 to p1
         return p0, p1, igt
-        
+
+#TODO: move to utils_commmon.py
+class PointRegistrationEasy(torch.utils.data.Dataset):
+    def __init__(self, dataset, rigid_transform, sigma=0.00, clip=0.00):
+        self.dataset = dataset
+        self.transf = rigid_transform
+        self.sigma = sigma
+        self.clip = clip
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        pm, p0 = self.dataset[index]  # one point cloud
+        # assumes: p0 is the full point cloud, pm is the depth point cloud of p0. no rotation change.
+        p_ = add_noise(pm, sigma=self.sigma, clip=self.clip)
+        p1 = self.transf(p_)
+        igt = self.transf.igt.squeeze(0)
+        # p0 = pm
+        del p_, pm
+
+        # p0: template, p1: source, igt:transform matrix from p0 to p1
+        return p0, p1, igt
+
 
 class PointRegistration_fixed_perturbation(torch.utils.data.Dataset):
     def __init__(self, dataset, rigid_transform, sigma=0.00, clip=0.00):
